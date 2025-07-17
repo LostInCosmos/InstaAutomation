@@ -2,26 +2,31 @@ from __future__ import unicode_literals
 import os
 import yt_dlp
 import whisper
+import re
+import json
+
+output_dir = "../downloads/reels/"
+
+def sanitize_filename(filename):
+    sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)
+    return sanitized.replace('\n', '').replace('\r', '').strip()
 
 def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False):
     os.makedirs(output_dir, exist_ok=True)
-    # Get video title without downloading using yt_dlp
     try:
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(video_url, download=False)
-            title = info['title']
+            title = sanitize_filename(info['title'])
     except Exception as e:
         print(f"[!] Failed to fetch video info: {e}")
         return None
-
     mp3_file = os.path.join(output_dir, f"{title}.mp3")
     if os.path.exists(mp3_file):
         print(f"[+] MP3 already exists, reusing: {mp3_file}")
         return mp3_file
-
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+        'outtmpl': os.path.join(output_dir, f'{title}.%(ext)s'),
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -31,7 +36,7 @@ def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False)
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
+            ydl.extract_info(video_url, download=True)
             print(f"[+] Downloaded and converted to mp3: {mp3_file}")
             return mp3_file
     except Exception as e:
@@ -42,162 +47,178 @@ def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False)
 def transcribe_audio_to_text(audio_path):
     base, _ = os.path.splitext(audio_path)
     transcript_path = base + ".txt"
-    if os.path.exists(transcript_path):
-        print(f"[+] Transcript already exists, reusing: {transcript_path}")
+    sentences_json_path = base + "_sentences.json"
+    if os.path.exists(transcript_path) and os.path.exists(sentences_json_path):
+        print(f"[+] Transcript and sentences JSON already exist, reusing: {transcript_path}, {sentences_json_path}")
         with open(transcript_path, "r", encoding="utf-8") as f:
-            return f.read()
+            transcript = f.read()
+        with open(sentences_json_path, "r", encoding="utf-8") as f:
+            sentences = json.load(f)
+        return transcript, sentences
     model = whisper.load_model("base")
     print(f"[+] Transcribing audio: {audio_path}")
-    result = model.transcribe(audio_path)
+    result = model.transcribe(audio_path, word_timestamps=False)
     transcript = result['text']
     with open(transcript_path, "w", encoding="utf-8") as f:
         f.write(transcript)
     print(f"[+] Transcript saved at: {transcript_path}")
-    return transcript
+    sentences = []
+    for seg in result["segments"]:
+        seg_sentences = re.split(r'(?<=[.!?])\s+', seg["text"].strip())
+        start, end = seg["start"], seg["end"]
+        if len(seg_sentences) == 1:
+            sentences.append({"text": seg_sentences[0], "start": start, "end": end})
+        else:
+            total_len = sum(len(s) for s in seg_sentences)
+            cur_start = start
+            for s in seg_sentences:
+                ratio = len(s) / total_len if total_len > 0 else 1.0 / len(seg_sentences)
+                duration = (end - start) * ratio
+                sentences.append({"text": s, "start": cur_start, "end": cur_start + duration})
+                cur_start += duration
+    with open(sentences_json_path, "w", encoding="utf-8") as f:
+        json.dump(sentences, f, ensure_ascii=False, indent=2)
+    print(f"[+] Sentences with timestamps saved at: {sentences_json_path}")
+    return transcript, sentences
 
-def transcribe_audio_to_segments(audio_path):
-    """
-    Transcribe audio and return a list of segments with text and timestamps.
-    Each segment: {'start': float, 'end': float, 'text': str}
-    """
-    base, _ = os.path.splitext(audio_path)
-    segments_path = base + "_segments.json"
-    if os.path.exists(segments_path):
-        print(f"[+] Segments already exist, reusing: {segments_path}")
-        import json
-        with open(segments_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    model = whisper.load_model("base")
-    print(f"[+] Transcribing audio to segments: {audio_path}")
-    result = model.transcribe(audio_path, word_timestamps=False)
-    segments = [
-        {"start": seg["start"], "end": seg["end"], "text": seg["text"].strip()}
-        for seg in result["segments"]
-    ]
-    import json
-    with open(segments_path, "w", encoding="utf-8") as f:
-        json.dump(segments, f)
-    return segments
+def connect_highlights_to_sentences(sentences, highlights):
+    results = []
+    sentence_texts = [s["text"].strip() for s in sentences]
+    for highlight in highlights:
+        highlight = highlight.strip()
+        found = False
+        for i in range(len(sentence_texts)):
+            for j in range(i+1, len(sentence_texts)+1):
+                combined = " ".join(sentence_texts[i:j]).strip()
+                if combined == highlight:
+                    start = sentences[i]["start"]
+                    end = sentences[j-1]["end"]
+                    results.append({"text": highlight, "start": start, "end": end})
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            from difflib import SequenceMatcher
+            best_ratio, best_sent = 0, None
+            for sent in sentences:
+                ratio = SequenceMatcher(None, highlight.lower(), sent["text"].lower()).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_sent = sent
+            if best_sent and best_ratio > 0.4:
+                results.append({"text": highlight, "start": best_sent["start"], "end": best_sent["end"]})
+            else:
+                results.append({"text": highlight, "start": None, "end": None})
+    return results
 
 def extract_meaningful_parts(transcript):
-    import re
     keywords = [
         "joke", "funny", "quote", "laugh", "moment", "lesson", "story", "advice", "wisdom", "important", "key", "tip"
     ]
-    # Split transcript into sentences using regex for better accuracy
     sentences = re.split(r'(?<=[.!?])\s+', transcript)
-    highlights = [
-        s.strip() for s in sentences
-        if any(k in s.lower() for k in keywords)
-    ]
-    return highlights
+    return [s.strip() for s in sentences if any(k in s.lower() for k in keywords)]
 
-def extract_reel_material(transcript):
-    """
-    Use OpenAI GPT to extract the most interesting, deep, or impactful moments from the transcript.
-    Returns a list of 'reel material' sentences or paragraphs.
-    If OpenAI quota is exceeded, fallback to keyword-based extraction.
-    """
+def extract_reel_material_hf(
+    transcript,
+    model="moonshotai/Kimi-K2-Instruct",
+    hf_token=None
+):
+    import os
+    from huggingface_hub import InferenceClient
+    if hf_token is None:
+        hf_token = os.getenv("HUGGINGFACE_API_TOKEN") or os.getenv("HF_TOKEN")
+    if not hf_token:
+        print("[!] HuggingFace API token not set. Set HUGGINGFACE_API_TOKEN or HF_TOKEN env variable.")
+        return []
+    prompt = (
+        "From the transcript below, extract all segments that are powerful, funny, emotional, insightful, or otherwise suitable for social media reels.\n\n"
+        "IMPORTANT RULES:\n"
+        "- DO NOT rephrase, rewrite, or summarize anything.\n"
+        "- Copy the exact lines from the transcript as they appear.\n"
+        "- Group consecutive lines together into longer segments if they form a complete thought, story, or flow naturally (such as a quote continued after a pause, a full anecdote, or a back-and-forth conversation).\n"
+        "- Prefer longer, context-rich segments over short snippets, as long as they remain engaging and relevant.\n"
+        "- Include full conversations, jokes, or statements only if the entire sequence feels impactful or reel-worthy.\n"
+        "- Use your best judgment as a content editor to find viral, emotional, or highly engaging moments.\n"
+        "- If in doubt, prefer to include more context rather than less.\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        "Reel-Worthy Transcript Segments (Verbatim, as bullet points):"
+    )
     try:
-        import openai
-        openai.api_key = os.getenv("OPENAI_API_KEY")  # Set your API key in env variable
-
-        # Split transcript into smaller chunks if it's too long for the model
-        max_chunk_size = 3500  # chars, safe for gpt-3.5-turbo context
-        chunks = [transcript[i:i+max_chunk_size] for i in range(0, len(transcript), max_chunk_size)]
-        all_highlights = []
-
-        for idx, chunk in enumerate(chunks):
-            prompt = (
-                "Extract all interesting, deep, emotional, or impactful quotes or moments from the following transcript chunk. "
-                "Return each as a separate bullet point. Only include content suitable for social media reels.\n\n"
-                f"Transcript chunk {idx+1}:\n{chunk}\n\nReel Material:"
-            )
-            client = openai.OpenAI(api_key=openai.api_key)
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=800,
-                temperature=0.7,
-            )
-            content = response.choices[0].message.content
-            highlights = [line.lstrip('-• ').strip() for line in content.split('\n') if line.strip()]
-            all_highlights.extend(highlights)
-
-        # Remove duplicates and empty lines
-        unique_highlights = []
-        seen = set()
-        for h in all_highlights:
-            if h and h not in seen:
-                unique_highlights.append(h)
-                seen.add(h)
-        return unique_highlights
-
+        client = InferenceClient(
+            provider="together",
+            api_key=hf_token,
+        )
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = completion.choices[0].message.content
+        print("[AI RAW RESPONSE]\n", content)
+        highlights = [line.lstrip('-• ').strip() for line in content.split('\n') if line.strip()]
+        return highlights
     except Exception as e:
-        print(f"[!] OpenAI API error: {e}")
+        print(f"[!] HuggingFace API error: {e}")
         print("[!] Falling back to keyword-based extraction.")
         return extract_meaningful_parts(transcript)
 
-# Utility function to estimate tokens for a given text
-def estimate_token_count(text):
-    """
-    Roughly estimates the number of tokens for a given text.
-    For English, 1 token ≈ 4 characters or ≈ 0.75 words.
-    """
-    num_words = len(text.split())
-    estimated_tokens = int(num_words / 0.75)
-    print(f"[i] Estimated tokens for transcript: {estimated_tokens} (for {num_words} words)")
-    return estimated_tokens
+def cut_video_segments(video_path, segments, output_dir="../downloads/clips"):
+    import subprocess
+    os.makedirs(output_dir, exist_ok=True)
+    output_files = []
+    for idx, seg in enumerate(segments):
+        if seg["start"] is None or seg["end"] is None:
+            continue
+        out_file = os.path.join(
+            output_dir,
+            f"clip_{idx+1}_{int(seg['start'])}-{int(seg['end'])}.mp4"
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss", str(seg["start"]),
+            "-to", str(seg["end"]),
+            "-i", video_path,
+            "-c", "copy",
+            out_file
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        output_files.append(out_file)
+    return output_files
 
-def find_timestamps_for_highlights(segments, highlights):
-    """
-    For each highlight, find the segment with the highest text overlap.
-    Returns a list of dicts: {'text': highlight, 'start': float, 'end': float}
-    """
-    from difflib import SequenceMatcher
-    results = []
-    for highlight in highlights:
-        best_ratio = 0
-        best_seg = None
-        for seg in segments:
-            ratio = SequenceMatcher(None, highlight.lower(), seg["text"].lower()).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_seg = seg
-        if best_seg and best_ratio > 0.4:  # threshold to avoid false matches
-            results.append({
-                "text": highlight,
-                "start": max(0, best_seg["start"] - 1),
-                "end": best_seg["end"] + 1
-            })
-        else:
-            results.append({
-                "text": highlight,
-                "start": None,
-                "end": None
-            })
-    return results
-
-# Use direct link
-url = "https://www.youtube.com/watch?v=dlKkFQQg9_Q"
+# --- MAIN EXECUTION ---
+url = "https://www.youtube.com/watch?v=FRTpI2Gu1KA"
 mp3_path = download_youtube_audio(url, cleanup=True)
 if mp3_path:
     print("Final MP3 saved at:", mp3_path)
-    transcript = transcribe_audio_to_text(mp3_path)
+    transcript, sentences = transcribe_audio_to_text(mp3_path)
     print(f"[+] Transcript length: {len(transcript)} characters")
     print("[+] Transcript sample:", transcript[:300], "...")
-    estimate_token_count(transcript)
-    highlights = extract_reel_material(transcript)
+    highlights = extract_reel_material_hf(transcript)
     print("[+] Extracted reel material:")
     if highlights:
-        segments = transcribe_audio_to_segments(mp3_path)
-        highlights_with_times = find_timestamps_for_highlights(segments, highlights)
+        highlights_with_times = connect_highlights_to_sentences(sentences, highlights)
         for h in highlights_with_times:
             if h["start"] is not None:
                 print(f"- [{h['start']:.1f}s - {h['end']:.1f}s]: {h['text']}")
             else:
                 print(f"- [timestamp not found]: {h['text']}")
+        video_url = url
+        video_output = mp3_path.replace(".mp3", ".mp4")
+        if not os.path.exists(video_output):
+            print(f"[+] Downloading video: {video_url}")
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': video_output,
+                'quiet': True,
+                'merge_output_format': 'mp4'
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+        print("[+] Cutting video segments...")
+        cut_files = cut_video_segments(video_output, highlights_with_times, output_dir=output_dir)
+        print(f"[+] Created {len(cut_files)} video clips in {output_dir}")
     else:
         print("[!] No reel material found. Try adjusting your prompt or check the transcript.")
 else:
-    print("[!] Download failed.")
+    print("[!] Error downloading MP3.")
