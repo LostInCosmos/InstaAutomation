@@ -5,7 +5,6 @@ import whisper
 import re
 import json
 
-output_dir = "../downloads/reels/"
 
 def sanitize_filename(filename):
     sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)
@@ -84,20 +83,62 @@ def transcribe_audio_to_text(audio_path):
 def connect_highlights_to_sentences(sentences, highlights):
     results = []
     sentence_texts = [s["text"].strip() for s in sentences]
+
     for highlight in highlights:
         highlight = highlight.strip()
         found = False
+
+        # 1. Exact sequence match
         for i in range(len(sentence_texts)):
-            for j in range(i+1, len(sentence_texts)+1):
+            for j in range(i + 1, len(sentence_texts) + 1):
                 combined = " ".join(sentence_texts[i:j]).strip()
                 if combined == highlight:
-                    start = sentences[i]["start"]
-                    end = sentences[j-1]["end"]
-                    results.append({"text": highlight, "start": start, "end": end})
+                    results.append({
+                        "text": highlight,
+                        "start": sentences[i]["start"],
+                        "end": sentences[j - 1]["end"]
+                    })
                     found = True
                     break
             if found:
                 break
+
+        if not found:
+            for j in range(len(sentence_texts), 0, -1):
+                for i in range(j):
+                    combined = " ".join(sentence_texts[i:j]).strip()
+                    if highlight in combined:
+                        start_idx = i
+                        while start_idx > 0 and sentence_texts[start_idx - 1] in highlight:
+                            start_idx -= 1
+                        results.append({
+                            "text": highlight,
+                            "start": sentences[start_idx]["start"],
+                            "end": sentences[j - 1]["end"]
+                        })
+                        found = True
+                        break
+                if found:
+                    break
+
+        if not found:
+            max_overlap = 0
+            best_i, best_j = None, None
+            for i in range(len(sentence_texts)):
+                for j in range(i + 1, len(sentence_texts) + 1):
+                    combined = " ".join(sentence_texts[i:j]).strip()
+                    overlap = len(os.path.commonprefix([highlight, combined]))
+                    if overlap > max_overlap:
+                        max_overlap = overlap
+                        best_i, best_j = i, j
+            if best_i is not None and best_j is not None and max_overlap > 30:
+                results.append({
+                    "text": highlight,
+                    "start": sentences[best_i]["start"],
+                    "end": sentences[best_j - 1]["end"]
+                })
+                found = True
+
         if not found:
             from difflib import SequenceMatcher
             best_ratio, best_sent = 0, None
@@ -107,60 +148,20 @@ def connect_highlights_to_sentences(sentences, highlights):
                     best_ratio = ratio
                     best_sent = sent
             if best_sent and best_ratio > 0.4:
-                results.append({"text": highlight, "start": best_sent["start"], "end": best_sent["end"]})
+                results.append({
+                    "text": highlight,
+                    "start": best_sent["start"],
+                    "end": best_sent["end"]
+                })
             else:
-                results.append({"text": highlight, "start": None, "end": None})
+                results.append({
+                    "text": highlight,
+                    "start": None,
+                    "end": None
+                })
+
     return results
 
-def extract_meaningful_parts(transcript):
-    keywords = [
-        "joke", "funny", "quote", "laugh", "moment", "lesson", "story", "advice", "wisdom", "important", "key", "tip"
-    ]
-    sentences = re.split(r'(?<=[.!?])\s+', transcript)
-    return [s.strip() for s in sentences if any(k in s.lower() for k in keywords)]
-
-def extract_reel_material_hf(
-    transcript,
-    model="moonshotai/Kimi-K2-Instruct",
-    hf_token=None
-):
-    import os
-    from huggingface_hub import InferenceClient
-    if hf_token is None:
-        hf_token = os.getenv("HUGGINGFACE_API_TOKEN") or os.getenv("HF_TOKEN")
-    if not hf_token:
-        print("[!] HuggingFace API token not set. Set HUGGINGFACE_API_TOKEN or HF_TOKEN env variable.")
-        return []
-    prompt = (
-        "From the transcript below, extract all segments that are powerful, funny, emotional, insightful, or otherwise suitable for social media reels.\n\n"
-        "IMPORTANT RULES:\n"
-        "- DO NOT rephrase, rewrite, or summarize anything.\n"
-        "- Copy the exact lines from the transcript as they appear.\n"
-        "- Group consecutive lines together into longer segments if they form a complete thought, story, or flow naturally (such as a quote continued after a pause, a full anecdote, or a back-and-forth conversation).\n"
-        "- Prefer longer, context-rich segments over short snippets, as long as they remain engaging and relevant.\n"
-        "- Include full conversations, jokes, or statements only if the entire sequence feels impactful or reel-worthy.\n"
-        "- Use your best judgment as a content editor to find viral, emotional, or highly engaging moments.\n"
-        "- If in doubt, prefer to include more context rather than less.\n\n"
-        f"Transcript:\n{transcript}\n\n"
-        "Reel-Worthy Transcript Segments (Verbatim, as bullet points):"
-    )
-    try:
-        client = InferenceClient(
-            provider="together",
-            api_key=hf_token,
-        )
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        content = completion.choices[0].message.content
-        print("[AI RAW RESPONSE]\n", content)
-        highlights = [line.lstrip('-• ').strip() for line in content.split('\n') if line.strip()]
-        return highlights
-    except Exception as e:
-        print(f"[!] HuggingFace API error: {e}")
-        print("[!] Falling back to keyword-based extraction.")
-        return extract_meaningful_parts(transcript)
 
 def cut_video_segments(video_path, segments, output_dir="../downloads/clips"):
     import subprocess
@@ -186,39 +187,3 @@ def cut_video_segments(video_path, segments, output_dir="../downloads/clips"):
         output_files.append(out_file)
     return output_files
 
-# --- MAIN EXECUTION ---
-url = "https://www.youtube.com/watch?v=FRTpI2Gu1KA"
-mp3_path = download_youtube_audio(url, cleanup=True)
-if mp3_path:
-    print("Final MP3 saved at:", mp3_path)
-    transcript, sentences = transcribe_audio_to_text(mp3_path)
-    print(f"[+] Transcript length: {len(transcript)} characters")
-    print("[+] Transcript sample:", transcript[:300], "...")
-    highlights = extract_reel_material_hf(transcript)
-    print("[+] Extracted reel material:")
-    if highlights:
-        highlights_with_times = connect_highlights_to_sentences(sentences, highlights)
-        for h in highlights_with_times:
-            if h["start"] is not None:
-                print(f"- [{h['start']:.1f}s - {h['end']:.1f}s]: {h['text']}")
-            else:
-                print(f"- [timestamp not found]: {h['text']}")
-        video_url = url
-        video_output = mp3_path.replace(".mp3", ".mp4")
-        if not os.path.exists(video_output):
-            print(f"[+] Downloading video: {video_url}")
-            ydl_opts = {
-                'format': 'bestvideo+bestaudio/best',
-                'outtmpl': video_output,
-                'quiet': True,
-                'merge_output_format': 'mp4'
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-        print("[+] Cutting video segments...")
-        cut_files = cut_video_segments(video_output, highlights_with_times, output_dir=output_dir)
-        print(f"[+] Created {len(cut_files)} video clips in {output_dir}")
-    else:
-        print("[!] No reel material found. Try adjusting your prompt or check the transcript.")
-else:
-    print("[!] Error downloading MP3.")

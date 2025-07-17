@@ -1,0 +1,6 @@
+yt-dlp
+openai-whisper
+huggingface_hub
+transformers
+requests
+torch
