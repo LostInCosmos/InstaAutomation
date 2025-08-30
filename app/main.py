@@ -45,10 +45,18 @@ if not verify_background_image(background_image_path):
 
 print(f"[+] ✅ System ready! Background image: {os.path.basename(background_image_path)}")
 
-mp3_path = download_youtube_audio(url, cleanup=True)
-if mp3_path:
+mp3_path, video_title = download_youtube_audio(url, cleanup=True)
+if mp3_path and video_title:
     print("Final MP3 saved at:", mp3_path)
     transcript, sentences = transcribe_audio_to_text(mp3_path)
+    
+    # Delete audio file after transcript is created (use transcript as cache)
+    try:
+        os.remove(mp3_path)
+        print(f"[+] Cleaned up audio file: {os.path.basename(mp3_path)}")
+    except Exception as e:
+        print(f"[!] Could not delete audio file: {e}")
+    
     print(f"[+] Transcript length: {len(transcript)} characters")
     print("[+] Transcript sample:", transcript[:300], "...")
     highlights = extract_reel_material_hf(sentences)  # Pass sentences instead of transcript
@@ -60,6 +68,7 @@ if mp3_path:
         else:
             # Fallback: connect text highlights to sentences for timestamps
             highlights_with_times = connect_highlights_to_sentences(sentences, highlights)
+        
         for h in highlights_with_times:
             if h.get("start_time") is not None:
                 duration = h.get("duration", h.get("end_time", 0) - h.get("start_time", 0))
@@ -69,18 +78,7 @@ if mp3_path:
                     print(f"  💡 Hook: {hook}")
             else:
                 print(f"- [timestamp not found]: {h.get('text', str(h))[:100]}...")
-        video_url = url
-        video_output = mp3_path.replace(".mp3", ".mp4")
-        if not os.path.exists(video_output):
-            print(f"[+] Downloading video: {video_url}")
-            ydl_opts = {
-                'format': 'bestvideo+bestaudio/best',
-                'outtmpl': video_output,
-                'quiet': True,
-                'merge_output_format': 'mp4'
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
+        
         print("[+] Cutting video segments...")
         cut_files = cut_video_segments(url, highlights_with_times, output_dir=output_dir)
         print(f"[+] Created {len(cut_files)} video clips in {output_dir}")
@@ -90,8 +88,19 @@ if mp3_path:
             instagram_reels = process_clips_with_background(
                 clip_files=cut_files,
                 background_image_path=background_image_path,
-                output_dir=config.OUTPUT_REELS_DIR
+                output_dir=config.OUTPUT_REELS_DIR,
+                video_title=video_title
             )
+            
+            # Delete clip files after reels are created (save only final reels)
+            print("[+] Cleaning up clip files...")
+            for clip_file in cut_files:
+                try:
+                    os.remove(clip_file)
+                    print(f"[+] Deleted clip: {os.path.basename(clip_file)}")
+                except Exception as e:
+                    print(f"[!] Could not delete clip {os.path.basename(clip_file)}: {e}")
+            
             print(f"[+] 🎉 Final result: {len(instagram_reels)} Instagram reels ready!")
             for reel in instagram_reels:
                 print(f"   📱 {os.path.basename(reel)}")

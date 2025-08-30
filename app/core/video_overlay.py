@@ -1,5 +1,6 @@
 import os
 import subprocess
+import json
 from PIL import Image
 import shutil
 import config
@@ -43,7 +44,6 @@ def overlay_video_on_background(video_path, background_image_path, output_path,
             video_path
         ]
         
-        import json
         result = subprocess.run(probe_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"[!] Failed to probe video: {video_path}")
@@ -133,7 +133,7 @@ def overlay_video_on_background(video_path, background_image_path, output_path,
         print(f"[!] Error creating video overlay: {e}")
         return None
 
-def process_clips_with_background(clip_files, background_image_path, output_dir="../downloads/instagram_reels"):
+def process_clips_with_background(clip_files, background_image_path, output_dir="../downloads/instagram_reels", video_title="video"):
     """
     Process multiple video clips by overlaying them onto a background image.
     
@@ -167,9 +167,8 @@ def process_clips_with_background(clip_files, background_image_path, output_dir=
             print(f"[!] Clip not found: {clip_path}")
             continue
             
-        # Generate output filename
-        base_name = os.path.splitext(os.path.basename(clip_path))[0]
-        output_path = os.path.join(output_dir, f"reel_{base_name}.mp4")
+        # Generate output filename with video title and reel number
+        output_path = os.path.join(output_dir, f"{video_title}_reel{idx:02d}.mp4")
         
         print(f"\n[{idx}/{len(clip_files)}] Processing: {os.path.basename(clip_path)}")
         

@@ -50,7 +50,7 @@ def test_system_requirements():
     
     # Test 4: Python packages
     print("4. Testing Python packages...")
-    required_packages = ['PIL', 'subprocess', 'json']
+    required_packages = ['PIL']
     
     for package in required_packages:
         try:
@@ -85,8 +85,6 @@ def main():
     if test_system_requirements():
         show_configuration()
         print("\n✅ System test passed! You can now run:")
-        print("   python demo.py 'YOUR_YOUTUBE_URL'")
-        print("   or")
         print("   python main.py")
     else:
         print("\n❌ System test failed. Please fix the issues above.")

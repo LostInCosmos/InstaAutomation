@@ -1,4 +1,3 @@
-from __future__ import unicode_literals
 import os
 import yt_dlp
 import whisper
@@ -21,11 +20,11 @@ def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False)
             print(f"[+] Duration: {duration//60}m {duration%60}s")
     except Exception as e:
         print(f"[!] Failed to fetch video info: {e}")
-        return None
+        return None, None
     mp3_file = os.path.join(output_dir, f"{title}.mp3")
     if os.path.exists(mp3_file):
         print(f"[+] MP3 already exists, reusing: {mp3_file}")
-        return mp3_file
+        return mp3_file, title
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(output_dir, f'{title}.%(ext)s'),
@@ -50,11 +49,11 @@ def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(video_url, download=True)
             print(f"[+] Downloaded and converted to mp3: {mp3_file}")
-            return mp3_file
+            return mp3_file, title
     except Exception as e:
         print(f"[!] Failed to download audio: {e}")
         print("[!] Try upgrading yt-dlp: pip install -U yt-dlp")
-        return None
+        return None, None
 
 def transcribe_audio_to_text(audio_path):
     print("\n[2/3] 🎯 Preparing transcription...")

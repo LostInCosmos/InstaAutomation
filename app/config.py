@@ -22,10 +22,3 @@ OUTPUT_REELS_DIR = "../downloads/instagram_reels/"
 # FFmpeg Settings
 FFMPEG_PRESET = "fast"   # FFmpeg encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
 PIXEL_FORMAT = "yuv420p" # Pixel format for compatibility
-
-# Keywords for fallback extraction (if AI fails)
-FALLBACK_KEYWORDS = [
-    "joke", "funny", "quote", "laugh", "moment", "lesson", 
-    "story", "advice", "wisdom", "important", "key", "tip",
-    "amazing", "incredible", "secret", "truth", "fact"
-]

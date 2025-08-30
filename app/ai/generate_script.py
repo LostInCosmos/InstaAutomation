@@ -1,13 +1,13 @@
 import re
+import os
+import json
+from huggingface_hub import InferenceClient
 
 def extract_reel_material_hf(
     transcript_segments,  # Changed from transcript to transcript_segments
     model="moonshotai/Kimi-K2-Instruct",
     hf_token=None
 ):
-    import os
-    import json
-    from huggingface_hub import InferenceClient
     if hf_token is None:
         hf_token = os.getenv("HUGGINGFACE_API_TOKEN") or os.getenv("HF_TOKEN")
     if not hf_token:
@@ -68,7 +68,6 @@ def extract_reel_material_hf(
                 content_clean = '\n'.join(content_clean.split('\n')[1:-1])
             
             # Try to extract JSON array from the response
-            import re
             json_match = re.search(r'\[.*\]', content_clean, re.DOTALL)
             if json_match:
                 content_clean = json_match.group(0)
