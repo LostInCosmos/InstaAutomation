@@ -15,7 +15,7 @@ CLIP_DURATION_MIN = 40   # Minimum clip duration in seconds
 CLIP_DURATION_MAX = 60   # Maximum clip duration in seconds
 
 # Paths
-BACKGROUND_IMAGE = "../assets/background/instagram_reel_black.jpg"
+BACKGROUND_IMAGE = "../assets/background/divine_virtues.png"
 OUTPUT_CLIPS_DIR = "../downloads/reels/"
 OUTPUT_REELS_DIR = "../downloads/instagram_reels/"
 

@@ -9,7 +9,29 @@ output_dir = config.OUTPUT_CLIPS_DIR
 background_image_path = os.path.abspath(config.BACKGROUND_IMAGE)
 
 # --- MAIN EXECUTION ---
-url = "https://www.youtube.com/watch?v=JjvN_hYDp3g"
+print("🎬 Instagram Reel Creator")
+print("=" * 50)
+print("This tool will create Instagram reels from YouTube videos")
+print("by extracting engaging clips and overlaying them on a background.")
+print()
+
+# Get YouTube URL from user
+while True:
+    url = input("🔗 Enter YouTube URL: ").strip()
+    
+    if not url:
+        print("[!] Please enter a valid YouTube URL")
+        continue
+    
+    # Basic URL validation
+    if "youtube.com/watch" not in url and "youtu.be/" not in url:
+        print("[!] Please enter a valid YouTube URL (youtube.com or youtu.be)")
+        continue
+    
+    print(f"[+] Using URL: {url}")
+    break
+
+print()
 
 # Check system requirements
 if not check_ffmpeg():
