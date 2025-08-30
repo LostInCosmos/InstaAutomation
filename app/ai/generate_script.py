@@ -60,10 +60,40 @@ def extract_reel_material_hf(
         
         try:
             # Try to parse the response as JSON
-            clips = json.loads(content.strip())
-            if isinstance(clips, list):
-                print(f"[+] ✅ Successfully extracted {len(clips)} clips from AI")
-                return clips
+            # First, try to clean up common JSON issues
+            content_clean = content.strip()
+            
+            # Remove markdown code blocks if present
+            if content_clean.startswith('```'):
+                content_clean = '\n'.join(content_clean.split('\n')[1:-1])
+            
+            # Try to extract JSON array from the response
+            import re
+            json_match = re.search(r'\[.*\]', content_clean, re.DOTALL)
+            if json_match:
+                content_clean = json_match.group(0)
+            
+            clips = json.loads(content_clean)
+            if isinstance(clips, list) and len(clips) > 0:
+                # Validate that clips have required fields
+                valid_clips = []
+                for clip in clips:
+                    if isinstance(clip, dict) and 'text' in clip:
+                        # Ensure required fields exist
+                        if 'start_time' not in clip:
+                            clip['start_time'] = None
+                        if 'end_time' not in clip:
+                            clip['end_time'] = None
+                        if 'duration' not in clip:
+                            clip['duration'] = None
+                        if 'hook' not in clip:
+                            clip['hook'] = 'AI extracted content'
+                        valid_clips.append(clip)
+                
+                if valid_clips:
+                    print(f"[+] ✅ Successfully extracted {len(valid_clips)} clips from AI")
+                    return valid_clips
+                    
         except json.JSONDecodeError:
             print("[!] Failed to parse JSON response, trying to extract from text...")
         
