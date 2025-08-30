@@ -3,10 +3,32 @@ import yt_dlp
 import whisper
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor
+import subprocess
 
 def sanitize_filename(filename):
     sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)
     return sanitized.replace('\n', '').replace('\r', '').strip()
+
+def check_existing_transcript(video_url, output_dir="../downloads/"):
+    """Check if transcript files already exist for this video"""
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            title = sanitize_filename(info['title'])
+    except Exception:
+        return None, None, None
+    
+    base_path = os.path.join(output_dir, title)
+    transcript_path = base_path + ".txt"
+    sentences_json_path = base_path + "_sentences.json"
+    
+    if os.path.exists(transcript_path) and os.path.exists(sentences_json_path):
+        print(f"[+] 🎯 Found existing transcript files for: {title}")
+        print(f"[+] Skipping audio download - using cached transcript")
+        return transcript_path, sentences_json_path, title
+    
+    return None, None, title
 
 def download_youtube_audio(video_url, output_dir="../downloads/", cleanup=False):
     print("\n[1/3] 🎵 Fetching video information...")
@@ -70,13 +92,20 @@ def transcribe_audio_to_text(audio_path):
         with open(sentences_json_path, "r", encoding="utf-8") as f:
             sentences = json.load(f)
         return transcript, sentences
-    print(f"[+] Loading Whisper model...")
-    model = whisper.load_model("base")
+    print(f"[+] Loading Whisper model (tiny - faster processing)...")
+    model = whisper.load_model("tiny")  # Use tiny model for 4x faster processing
     
     print(f"[+] Starting transcription of: {os.path.basename(audio_path)}")
-    print(f"[+] This might take a few minutes depending on the audio length...")
+    print(f"[+] Using fast transcription mode...")
     
-    result = model.transcribe(audio_path, word_timestamps=False)
+    # Optimize transcription for speed
+    result = model.transcribe(
+        audio_path, 
+        word_timestamps=False,
+        fp16=True,  # Use half precision for speed
+        language="en",  # Skip language detection
+        condition_on_previous_text=False  # Disable context for speed
+    )
     transcript = result['text']
     
     print(f"[+] Transcription completed successfully!")
@@ -189,16 +218,16 @@ def connect_highlights_to_sentences(sentences, highlights):
 
 def cut_video_segments(video_url, segments, output_dir="../downloads/clips"):
     print("\n[3/3] 🎬 Processing video segments...")
-    import subprocess
     os.makedirs(output_dir, exist_ok=True)
     output_files = []
 
-    # Download high quality video first
-    print("[+] Downloading high quality video...")
+    # Download optimized quality video for faster processing
+    print("[+] Downloading optimized video for processing...")
     ydl_opts = {
-        'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best',  # Lower quality to avoid restrictions
+        'format': 'best[height<=480][ext=mp4]/best[ext=mp4]/best',  # Lower resolution for faster processing
         'outtmpl': os.path.join(output_dir, 'temp_video.%(ext)s'),
         'quiet': True,
+        'no_warnings': True,
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'web']
@@ -206,9 +235,7 @@ def cut_video_segments(video_url, segments, output_dir="../downloads/clips"):
         },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        'progress_hooks': [lambda d: print(f"[+] Downloading: {d['_percent_str']} of {d.get('_total_bytes_str', 'unknown size')}") 
-                          if d['status'] == 'downloading' else None],
+        }
     }
     
     try:
@@ -219,14 +246,13 @@ def cut_video_segments(video_url, segments, output_dir="../downloads/clips"):
         print(f"[!] Failed to download high quality video: {e}")
         return []
 
-    print(f"[+] Cutting {len(segments)} video segments...")
-    for idx, seg in enumerate(segments, 1):
+    def process_segment(idx, seg):
         start_time = seg.get("start_time") or seg.get("start")
         end_time = seg.get("end_time") or seg.get("end")
         
         if start_time is None or end_time is None:
             print(f"[!] Skipping segment {idx} - Invalid timestamps")
-            continue
+            return None
             
         out_file = os.path.join(
             output_dir,
@@ -234,24 +260,32 @@ def cut_video_segments(video_url, segments, output_dir="../downloads/clips"):
         )
         
         print(f"[+] Processing clip {idx}/{len(segments)}: {int(end_time - start_time)}s")
+        # Optimized FFmpeg command for 720p output quality
         cmd = [
             "ffmpeg",
-            "-y",
-            "-ss", str(start_time),
-            "-to", str(end_time),
-            "-i", video_path,
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-preset", "fast",
-            "-crf", "22",
+            "-y",  # Overwrite output
+            "-ss", str(start_time),  # Seek to start time
+            "-i", video_path,  # Input file
+            "-t", str(end_time - start_time),  # Duration instead of end time
+            "-c:v", "libx264",  # Video codec
+            "-preset", "fast",  # Balanced speed/quality
+            "-crf", "25",  # Better quality for 720p
+            "-c:a", "aac",  # Audio codec  
+            "-b:a", "128k",  # Higher audio bitrate for quality
+            "-avoid_negative_ts", "make_zero",  # Fix timing issues
             out_file
         ]
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print(f"[+] Saved: {os.path.basename(out_file)}")
-            output_files.append(out_file)
+            return out_file
         except Exception as e:
             print(f"[!] Failed to process segment {idx}: {e}")
+            return None
+
+    print(f"[+] Cutting {len(segments)} video segments with {min(4, os.cpu_count())} parallel threads...")
+    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count())) as executor:
+        output_files = list(executor.map(process_segment, range(1, len(segments) + 1), segments))
     
     # Cleanup temporary full video
     try:
@@ -259,6 +293,7 @@ def cut_video_segments(video_url, segments, output_dir="../downloads/clips"):
     except:
         pass
         
+    output_files = [f for f in output_files if f is not None]
     print(f"\n✨ Successfully created {len(output_files)} video clips!")
     return output_files
 
