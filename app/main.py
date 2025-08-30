@@ -1,12 +1,28 @@
 from core.get_video import download_youtube_audio, transcribe_audio_to_text, cut_video_segments, connect_highlights_to_sentences
+from core.video_overlay import process_clips_with_background, verify_background_image, check_ffmpeg
 from ai.generate_script import extract_reel_material_hf
+import config
 import yt_dlp
 import os
 
-output_dir = "../downloads/reels/"
+output_dir = config.OUTPUT_CLIPS_DIR
+background_image_path = os.path.abspath(config.BACKGROUND_IMAGE)
 
 # --- MAIN EXECUTION ---
-url = "https://www.youtube.com/watch?v=IcxZa7HOW1o"
+url = "https://www.youtube.com/watch?v=JjvN_hYDp3g"
+
+# Check system requirements
+if not check_ffmpeg():
+    print("[!] FFmpeg is required for video processing. Please install it first.")
+    exit(1)
+
+# Verify background image exists
+if not verify_background_image(background_image_path):
+    print(f"[!] Please ensure the background image exists at: {background_image_path}")
+    exit(1)
+
+print(f"[+] ✅ System ready! Background image: {os.path.basename(background_image_path)}")
+
 mp3_path = download_youtube_audio(url, cleanup=True)
 if mp3_path:
     print("Final MP3 saved at:", mp3_path)
@@ -46,6 +62,19 @@ if mp3_path:
         print("[+] Cutting video segments...")
         cut_files = cut_video_segments(url, highlights_with_times, output_dir=output_dir)
         print(f"[+] Created {len(cut_files)} video clips in {output_dir}")
+        
+        # Process clips with background overlay to create Instagram reels
+        if cut_files:
+            instagram_reels = process_clips_with_background(
+                clip_files=cut_files,
+                background_image_path=background_image_path,
+                output_dir=config.OUTPUT_REELS_DIR
+            )
+            print(f"[+] 🎉 Final result: {len(instagram_reels)} Instagram reels ready!")
+            for reel in instagram_reels:
+                print(f"   📱 {os.path.basename(reel)}")
+        else:
+            print("[!] No video clips were created to process with background.")
     else:
         print("[!] No reel material found. Try adjusting your prompt or check the transcript.")
 else:
