@@ -38,23 +38,19 @@ An AI-powered tool that automatically creates Instagram reels from YouTube video
 
 ## Usage 🎯
 
-### Quick Start with Demo
+### Usage
 
 ```bash
 cd app
-python demo.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
-```
-
-### Manual Usage
-
-```bash
-cd app
-python main.py
+python main.py --url "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" \
+  --background "../assets/background/divine_virtues.png" \
+  --min-duration 40 \
+  --max-duration 60
 ```
 
 ### Custom Background
 
-Place your custom background image in `assets/background/` and update the path in the code.
+Place your custom background image in `assets/background/` and pass its path via `--background` or set it in `app/config.py`.
 
 ## How It Works 🔄
 
