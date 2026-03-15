@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>MyCloud</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="logo-icon">☁️</span>
+      <span>MyCloud</span>
+    </div>
+
+    <button class="btn-upload" id="btnUpload">⬆ Upload</button>
+    <button class="btn-upload btn-secondary" id="btnNewFolder">📁 New Folder</button>
+
+    <div class="storage-box">
+      <p class="storage-label">Storage</p>
+      <div class="storage-bar">
+        <div class="storage-fill" id="storageFill"></div>
+      </div>
+      <p class="storage-text" id="storageText">Calculating...</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="breadcrumb" id="breadcrumb">My Drive</div>
+      <input class="search" id="searchInput" type="text" placeholder="🔍 Search files..." />
+      <div class="view-toggle">
+        <button id="btnGrid" class="active">⊞</button>
+        <button id="btnList">☰</button>
+      </div>
+    </header>
+
+    <div class="file-area" id="fileArea">
+      <div class="loading" id="loadingMsg">Loading...</div>
+      <div id="fileGrid" class="file-grid"></div>
+    </div>
+  </main>
+
+  <div class="modal-overlay" id="uploadModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Upload Files</h3>
+        <button id="btnCloseModal">✕</button>
+      </div>
+      <div class="dropzone" id="dropzone">
+        <div class="dropzone-icon">📂</div>
+        <p>Drop files here or <strong>click to browse</strong></p>
+        <input type="file" id="fileInput" multiple hidden />
+      </div>
+      <ul id="uploadList" class="upload-list"></ul>
+      <div class="modal-footer">
+        <button class="btn-cancel" id="btnCancel">Cancel</button>
+        <button class="btn-primary" id="btnUploadSubmit">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
