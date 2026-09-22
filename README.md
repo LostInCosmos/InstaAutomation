@@ -4,12 +4,13 @@ An AI-powered tool that automatically creates Instagram reels from YouTube video
 
 ## Features ✨
 
-- 🎵 **YouTube Audio Download**: Downloads high-quality audio from YouTube videos
-- 🎯 **AI-Powered Clip Extraction**: Uses advanced AI to identify the most engaging 40-60 second clips
-- ✂️ **Smart Video Segmentation**: Automatically cuts video segments with precise timestamps  
+- 🎵 **Parallel Downloads**: Audio and source video download concurrently, not sequentially
+- 🎯 **AI-Powered Clip Extraction**: Uses Groq's `gpt-oss-120b` to identify the most engaging 40-60 second clips
+- 📼 **Long-Video Support**: Multi-hour podcasts are automatically chunked (transcription + clip-selection) to work within Groq's free-tier rate limits
+- ✂️ **Smart Video Segmentation**: Automatically cuts video segments with precise timestamps
 - 🎨 **Background Overlay**: Overlays video clips onto custom background images for Instagram reel format
 - 📱 **Instagram Ready**: Outputs videos in perfect 9:16 aspect ratio for Instagram reels
-- 🤖 **Multiple AI Models**: Supports various Hugging Face models for content analysis
+- 💾 **Result Caching**: A fully-processed video's transcript + selected clips are cached, so re-runs skip straight to cutting
 
 ## Installation 🚀
 
@@ -29,37 +30,36 @@ An AI-powered tool that automatically creates Instagram reels from YouTube video
    - **MacOS**: `brew install ffmpeg` 
    - **Windows**: Download from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
-4. **Set up Hugging Face API token**:
+4. **Set up Groq API key** (used for both transcription and AI clip selection):
    ```bash
-   export HUGGINGFACE_API_TOKEN="your_token_here"
-   # or
-   export HF_TOKEN="your_token_here"
+   export GROQ_API_KEY="your_groq_api_key_here"
    ```
+   Get a free key at [console.groq.com](https://console.groq.com).
 
 ## Usage 🎯
 
-### Usage
-
 ```bash
 cd app
-python main.py --url "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" \
-  --background "../assets/background/divine_virtues.png" \
-  --min-duration 40 \
-  --max-duration 60
+python main.py
 ```
+
+The tool will prompt you for a YouTube URL interactively.
 
 ### Custom Background
 
-Place your custom background image in `assets/background/` and pass its path via `--background` or set it in `app/config.py`.
+Place your custom background image in `assets/background/` and set its path in `app/config.py` (`BACKGROUND_IMAGE`).
 
 ## How It Works 🔄
 
-1. **Video Analysis**: Downloads YouTube video and extracts audio
-2. **Transcription**: Uses OpenAI Whisper to create timestamped transcript
-3. **AI Processing**: Analyzes content to identify engaging clips (jokes, insights, stories)
-4. **Video Cutting**: Extracts precise video segments based on AI recommendations
-5. **Background Overlay**: Overlays clips onto background image in Instagram reel format
-6. **Output**: Generates ready-to-upload Instagram reels
+1. **Video lookup**: Title/duration are fetched once (no download).
+2. **Parallel downloads**: The (larger, slower) source video starts downloading in the background immediately, while:
+3. **Audio pipeline runs concurrently**: audio is downloaded, split into overlapping ~15 min chunks (needed for Groq Whisper's 25MB-per-request limit on long videos/podcasts), and each chunk is transcribed (Groq Whisper `large-v3`) then sent to Groq's `gpt-oss-120b` for clip selection. Calls to the clip-selection model are paced ~60s apart to stay under Groq's free-tier rate limit; while waiting, the *next* chunk is already being transcribed in the background so no time is wasted.
+4. **Dedup**: Clips found in the overlapping region between adjacent chunks are merged, keeping the better version.
+5. **Video cutting**: Once the source video (from step 2) and the selected clips (from step 4) are both ready, clips are cut out with FFmpeg.
+6. **Background overlay**: Clips are overlaid onto the background image in Instagram reel format (1080x1920, 9:16).
+7. **Caching**: The transcript, sentences, and selected clips are saved to `downloads/`, so re-running on the same video skips straight to cutting.
+
+This means a short video (under ~15 min) is processed with a single transcription + clip-selection call, while a multi-hour podcast is automatically split into several chunks and pipelined - see `app/core/pipeline.py`.
 
 ## Output Structure 📁
 
@@ -72,21 +72,22 @@ downloads/
 ## Customization 🛠️
 
 - **Background Images**: Place custom backgrounds in `assets/background/`
-- **AI Models**: Modify the model parameter in `generate_script.py`
-- **Video Quality**: Adjust FFmpeg parameters in `video_overlay.py`
-- **Clip Duration**: Modify the 40-60 second requirement in the AI prompt
+- **AI Model**: Change `DEFAULT_AI_MODEL` in `app/config.py`
+- **Video Quality**: Adjust `VIDEO_QUALITY`/`FFMPEG_PRESET` in `app/config.py`
+- **Clip Duration**: Adjust `CLIP_DURATION_MIN`/`CLIP_DURATION_MAX` in `app/config.py`
+- **Chunk size/pacing** (for long videos): `CHUNK_DURATION_SECONDS`, `CHUNK_OVERLAP_SECONDS`, `AI_CHUNK_DELAY_SECONDS` in `app/config.py`
 
 ## Requirements 📋
 
 - Python 3.8+
 - FFmpeg
-- Hugging Face API token
+- Groq API key
 - Sufficient disk space for video processing
 
 ## Troubleshooting 🔧
 
 - **FFmpeg not found**: Install FFmpeg and ensure it's in your system PATH
-- **API errors**: Check your Hugging Face token and internet connection
+- **API errors**: Check your Groq API key and internet connection
 - **Video download fails**: Try updating yt-dlp: `pip install -U yt-dlp`
 - **Background image not found**: Ensure the image exists in `assets/background/`
 

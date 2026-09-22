@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instagram Reel Creator</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e6e8ec;
+    --muted: #8b8f9a;
+    --accent: #6c5ce7;
+    --accent-hover: #7d6ef0;
+    --ok: #2ecc71;
+    --err: #e74c3c;
+    --run: #f5a623;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 0.95rem; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .panel h2 { margin: 0 0 14px; font-size: 1.05rem; }
+
+  .row { display: flex; gap: 10px; }
+  input[type=text] {
+    flex: 1;
+    background: #0d0f14;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 11px 14px;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    outline: none;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 11px 20px;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .status {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    display: none;
+    align-items: center;
+    gap: 10px;
+    background: #0d0f14;
+    border: 1px solid var(--border);
+  }
+  .status.show { display: flex; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.running { background: var(--run); animation: pulse 1.2s infinite; }
+  .dot.done { background: var(--ok); }
+  .dot.error { background: var(--err); }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+
+  .library-header { display: flex; justify-content: space-between; align-items: center; }
+  .refresh-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .refresh-btn:hover:not(:disabled) { color: var(--text); background: var(--border); }
+
+  .empty { color: var(--muted); font-size: 0.9rem; padding: 10px 0; }
+
+  .video-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-top: 12px;
+  }
+  .video-card summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.95rem;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .video-card summary::-webkit-details-marker { display: none; }
+  .video-card summary .count { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+
+  .clip-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+  }
+  .clip {
+    background: #0d0f14;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .clip video { width: 100%; display: block; aspect-ratio: 9/16; background: #000; }
+  .clip .name {
+    font-size: 0.78rem;
+    color: var(--muted);
+    padding: 6px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎬 Instagram Reel Creator</h1>
+  <p class="sub">Paste a YouTube link to generate reels, or browse what's already been made.</p>
+
+  <div class="panel">
+    <h2>New video</h2>
+    <div class="row">
+      <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+      <button id="submit-btn">Create reels</button>
+    </div>
+    <div class="status" id="status">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="library-header">
+      <h2>Local library</h2>
+      <button class="refresh-btn" id="refresh-btn">Refresh</button>
+    </div>
+    <div id="library"><p class="empty">Loading...</p></div>
+  </div>
+</div>
+
+<script>
+const urlInput = document.getElementById('url-input');
+const submitBtn = document.getElementById('submit-btn');
+const statusEl = document.getElementById('status');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const libraryEl = document.getElementById('library');
+const refreshBtn = document.getElementById('refresh-btn');
+
+let pollTimer = null;
+
+function setStatus(state, message) {
+  statusEl.classList.add('show');
+  statusDot.className = 'dot ' + state;
+  statusText.textContent = message;
+}
+
+async function submitUrl() {
+  const url = urlInput.value.trim();
+  if (!url) return;
+
+  submitBtn.disabled = true;
+  setStatus('running', 'Starting...');
+
+  try {
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus('error', data.error || 'Failed to start');
+      submitBtn.disabled = false;
+      return;
+    }
+    poll();
+  } catch (e) {
+    setStatus('error', 'Could not reach the server: ' + e);
+    submitBtn.disabled = false;
+  }
+}
+
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const res = await fetch('/api/status');
+    const job = await res.json();
+
+    if (job.state === 'running') {
+      setStatus('running', job.message || 'Working...');
+      pollTimer = setTimeout(poll, 2000);
+    } else if (job.state === 'done') {
+      setStatus('done', job.message || 'Done');
+      submitBtn.disabled = false;
+      urlInput.value = '';
+      loadLibrary();
+    } else if (job.state === 'error') {
+      setStatus('error', job.message || 'Something went wrong');
+      submitBtn.disabled = false;
+    } else {
+      submitBtn.disabled = false;
+    }
+  } catch (e) {
+    setStatus('error', 'Lost connection to the server');
+    submitBtn.disabled = false;
+  }
+}
+
+async function loadLibrary() {
+  try {
+    const res = await fetch('/api/library');
+    const data = await res.json();
+    renderLibrary(data.videos || []);
+  } catch (e) {
+    libraryEl.innerHTML = '<p class="empty">Could not load the library.</p>';
+  }
+}
+
+function renderLibrary(videos) {
+  if (videos.length === 0) {
+    libraryEl.innerHTML = '<p class="empty">No videos processed yet - submit a link above to get started.</p>';
+    return;
+  }
+
+  libraryEl.innerHTML = videos.map((v, i) => `
+    <details class="video-card" ${i === 0 ? 'open' : ''}>
+      <summary>
+        <span>${escapeHtml(v.title)}</span>
+        <span class="count">${v.clips.length} clip${v.clips.length === 1 ? '' : 's'}</span>
+      </summary>
+      <div class="clip-grid">
+        ${v.clips.map(c => `
+          <div class="clip">
+            <video controls preload="metadata" src="/clips/${encodeURIComponent(v.title)}/${encodeURIComponent(c)}"></video>
+            <div class="name">${escapeHtml(c)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </details>
+  `).join('');
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+submitBtn.addEventListener('click', submitUrl);
+urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitUrl(); });
+refreshBtn.addEventListener('click', loadLibrary);
+
+// Pick up an already-running job on page load (e.g. after a refresh)
+poll();
+loadLibrary();
+</script>
+</body>
+</html>

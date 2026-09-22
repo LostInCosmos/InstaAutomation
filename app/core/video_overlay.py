@@ -190,20 +190,30 @@ def process_clips_with_background(clip_files: List[str], background_image_path: 
     
     if output_dir is None:
         output_dir = config.OUTPUT_REELS_DIR
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
+    # Each video gets its own folder: <output_dir>/<video_title>/reel01.mp4, reel02.mp4, ...
+    video_dir = Path(output_dir) / video_title
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear any reels from a previous run of this video first, so re-processing
+    # (e.g. after a prompt/config change) never leaves stale clips mixed in with
+    # the new ones - the folder should always reflect only the latest run.
+    for old_file in video_dir.glob("*.mp4"):
+        try:
+            old_file.unlink()
+        except OSError as e:
+            logger.warning(f"Could not remove stale reel {old_file}: {e}")
+
     def process_single_clip(clip_data: Tuple[int, str]) -> Optional[str]:
         """Process a single clip with improved error handling."""
         idx, clip_path = clip_data
         clip_file = Path(clip_path)
-        
+
         if not clip_file.exists():
             logger.error(f"Clip not found: {clip_path}")
             print(f"[!] Clip not found: {clip_path}")
             return None
-            
-        # Generate output filename with video title and reel number
-        output_path = Path(output_dir) / f"{video_title}_reel{idx:02d}.mp4"
+
+        output_path = video_dir / f"reel{idx:02d}.mp4"
         
         logger.info(f"Processing clip {idx}/{len(clip_files)}: {clip_file.name}")
         print(f"\n[{idx}/{len(clip_files)}] Processing: {clip_file.name}")
@@ -237,7 +247,7 @@ def process_clips_with_background(clip_files: List[str], background_image_path: 
     overlay_time = time.time() - overlay_start_time
     logger.info(f"Successfully created {len(reel_files)} Instagram reels in {overlay_time:.1f}s")
     print(f"\n✨ Successfully created {len(reel_files)} Instagram reels!")
-    print(f"📁 Output directory: {output_dir}")
+    print(f"📁 Output directory: {video_dir}")
     print(f"⏱️  Overlay processing completed in: {overlay_time:.1f}s")
     
     return reel_files

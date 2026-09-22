@@ -1,7 +1,6 @@
 yt-dlp
-openai-whisper
-huggingface_hub
-transformers
+groq
 requests
-torch
 Pillow
+python-dotenv
+flask
