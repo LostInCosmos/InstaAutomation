@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 import config
 from utils.error_handler import retry_on_failure
+from core.subtitles import build_cues, save_cues
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,17 @@ def get_video_info(video_url: str) -> Optional[Dict[str, Any]]:
 
 def load_cached_results(title: str, output_dir: str = None) -> Optional[Dict[str, Any]]:
     """Load a previously-completed transcript + sentences + highlights for this
-    title, if all three are present on disk."""
+    title, if all three are present on disk. Word-level timestamps (used for
+    subtitles and precise clip-boundary padding) are loaded too if present, but
+    aren't required for a cache hit - older cached videos won't have them, and
+    forcing a full re-transcription just to backfill them would waste quota."""
     if output_dir is None:
         output_dir = str(config.DOWNLOADS_DIR)
     output_path = Path(output_dir)
     transcript_path = output_path / f"{title}.txt"
     sentences_path = output_path / f"{title}_sentences.json"
     highlights_path = output_path / f"{title}_highlights.json"
+    words_path = output_path / f"{title}_words.json"
 
     if not (transcript_path.exists() and sentences_path.exists() and highlights_path.exists()):
         return None
@@ -84,16 +89,20 @@ def load_cached_results(title: str, output_dir: str = None) -> Optional[Dict[str
             sentences = json.load(f)
         with open(highlights_path, "r", encoding="utf-8") as f:
             highlights = json.load(f)
-        logger.info(f"Loaded cached results for '{title}': {len(sentences)} sentences, {len(highlights)} highlights")
-        return {'transcript': transcript, 'sentences': sentences, 'highlights': highlights}
+        words = []
+        if words_path.exists():
+            with open(words_path, "r", encoding="utf-8") as f:
+                words = json.load(f)
+        logger.info(f"Loaded cached results for '{title}': {len(sentences)} sentences, {len(highlights)} highlights, {len(words)} words")
+        return {'transcript': transcript, 'sentences': sentences, 'highlights': highlights, 'words': words}
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"Failed to load cached results, reprocessing: {e}")
         return None
 
 
-def save_results(title: str, sentences: List[Dict], highlights: List[Dict], output_dir: str = None) -> None:
-    """Persist the assembled transcript/sentences/highlights so a re-run of the
-    same video can skip transcription and clip-selection entirely."""
+def save_results(title: str, sentences: List[Dict], highlights: List[Dict], words: List[Dict] = None, output_dir: str = None) -> None:
+    """Persist the assembled transcript/sentences/highlights/words so a re-run
+    of the same video can skip transcription and clip-selection entirely."""
     if output_dir is None:
         output_dir = str(config.DOWNLOADS_DIR)
     output_path = Path(output_dir)
@@ -106,6 +115,9 @@ def save_results(title: str, sentences: List[Dict], highlights: List[Dict], outp
         json.dump(sentences, f, ensure_ascii=False, indent=2)
     with open(output_path / f"{title}_highlights.json", "w", encoding="utf-8") as f:
         json.dump(highlights, f, ensure_ascii=False, indent=2)
+    if words:
+        with open(output_path / f"{title}_words.json", "w", encoding="utf-8") as f:
+            json.dump(words, f, ensure_ascii=False, indent=2)
     logger.info(f"Saved results for '{title}'")
 
 
@@ -246,10 +258,20 @@ def chunk_audio(audio_path: str, chunk_seconds: float, overlap_seconds: float, o
     return chunks
 
 
+def _attr(obj, key, default=None):
+    """Access a field on a Groq SDK response item, whether it comes back as a
+    dict or a typed object."""
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
 @retry_on_failure(max_retries=2, delay=5.0)
-def transcribe_chunk(chunk_path: str, offset_seconds: float, groq_api_key: str) -> List[Dict]:
-    """Transcribe one audio chunk via Groq's hosted Whisper, returning sentences
-    with timestamps offset to match the ORIGINAL (pre-chunking) audio timeline."""
+def transcribe_chunk(chunk_path: str, offset_seconds: float, groq_api_key: str) -> Tuple[List[Dict], List[Dict]]:
+    """Transcribe one audio chunk via Groq's hosted Whisper, returning
+    (sentences, words) with timestamps offset to match the ORIGINAL
+    (pre-chunking) audio timeline. Sentences feed the clip-selection LLM
+    prompt (word-level would be too verbose/token-heavy for that); words feed
+    subtitle generation and precise clip-boundary padding for the final,
+    already-selected clips."""
     client = Groq(api_key=groq_api_key)
     chunk_file = Path(chunk_path)
 
@@ -259,13 +281,14 @@ def transcribe_chunk(chunk_path: str, offset_seconds: float, groq_api_key: str) 
             model=config.GROQ_WHISPER_MODEL,
             response_format="verbose_json",
             language="en",
+            timestamp_granularities=["word", "segment"],
         )
 
     sentences = []
     for seg in result.segments:
-        seg_text = seg["text"] if isinstance(seg, dict) else seg.text
-        seg_start = (seg["start"] if isinstance(seg, dict) else seg.start) + offset_seconds
-        seg_end = (seg["end"] if isinstance(seg, dict) else seg.end) + offset_seconds
+        seg_text = _attr(seg, "text")
+        seg_start = _attr(seg, "start") + offset_seconds
+        seg_end = _attr(seg, "end") + offset_seconds
         seg_sentences = re.split(r'(?<=[.!?])\s+', seg_text.strip())
 
         if len(seg_sentences) == 1:
@@ -279,7 +302,15 @@ def transcribe_chunk(chunk_path: str, offset_seconds: float, groq_api_key: str) 
                 sentences.append({"text": s, "start": cur_start, "end": cur_start + duration})
                 cur_start += duration
 
-    return sentences
+    words = []
+    for w in (getattr(result, "words", None) or []):
+        words.append({
+            "text": _attr(w, "word", _attr(w, "text", "")),
+            "start": _attr(w, "start") + offset_seconds,
+            "end": _attr(w, "end") + offset_seconds,
+        })
+
+    return sentences, words
 
 
 def connect_highlights_to_sentences(sentences: List[Dict], highlights: List[str]) -> List[Dict]:
@@ -371,9 +402,11 @@ def connect_highlights_to_sentences(sentences: List[Dict], highlights: List[str]
 
 # --- Cutting clips from the (already-downloaded) source video ---
 
-def cut_segments_from_video(video_path: str, segments: List[Dict], output_dir: str = None) -> List[str]:
+def cut_segments_from_video(video_path: str, segments: List[Dict], words: List[Dict] = None, output_dir: str = None) -> List[str]:
     """Cut clips from an already-downloaded source video, in parallel. Deletes
-    the source video once cutting is done."""
+    the source video once cutting is done. If word-level timestamps are given,
+    also writes a matching <clip>.cues.json subtitle-cue file next to each
+    clip (see core.subtitles) for the overlay step to burn in later."""
     if output_dir is None:
         output_dir = config.OUTPUT_CLIPS_DIR
 
@@ -415,6 +448,11 @@ def cut_segments_from_video(video_path: str, segments: List[Dict], output_dir: s
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             logger.info(f"Processed segment {idx}: {out_file.name}")
             print(f"[+] Saved: {out_file.name}")
+
+            if words:
+                cues = build_cues(words, start_time, end_time)
+                save_cues(cues, str(out_file.with_suffix('.cues.json')))
+
             return str(out_file)
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg failed for segment {idx}: {e}")

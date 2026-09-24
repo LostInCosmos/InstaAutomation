@@ -28,6 +28,7 @@ change - ask before adding one.
 import os
 import time
 import logging
+from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Callable, Dict, List, Optional, Tuple, Any
@@ -79,11 +80,11 @@ def process_video(url: str, progress_callback: ProgressCallback = None) -> Dict[
     cached = load_cached_results(title)
     if cached:
         _notify(progress_callback, f"[+] 🎯 Using cached transcript + highlights for: {title}")
-        sentences, highlights = cached['sentences'], cached['highlights']
+        sentences, words, highlights = cached['sentences'], cached.get('words', []), cached['highlights']
     else:
-        sentences, highlights = _run_audio_pipeline(url, title, groq_api_key, progress_callback)
+        sentences, words, highlights = _run_audio_pipeline(url, title, groq_api_key, progress_callback)
         if sentences and highlights:
-            save_results(title, sentences, highlights)
+            save_results(title, sentences, highlights, words)
 
     if not highlights:
         _notify(progress_callback, "[!] No reel material found. Try a different video.")
@@ -97,7 +98,16 @@ def process_video(url: str, progress_callback: ProgressCallback = None) -> Dict[
         return {'reels': [], 'title': title}
 
     highlights = _resolve_missing_timestamps(highlights, sentences)
-    highlights = _pad_clip_boundaries(highlights, sentences)
+    highlights = _pad_clip_boundaries(highlights, words or sentences)
+    highlights = _filter_by_duration(highlights, progress_callback)
+
+    if not highlights:
+        _notify(progress_callback, "[!] No clips left after duration filtering. Try a different video.")
+        video_path = video_future.result()
+        download_pool.shutdown()
+        if video_path and Path(video_path).exists():
+            os.remove(video_path)
+        return {'reels': [], 'title': title}
 
     ai_time = time.time() - start_time
     _notify(progress_callback, f"[+] Extracted {len(highlights)} clips in {ai_time:.1f}s - waiting for source video download...")
@@ -107,7 +117,7 @@ def process_video(url: str, progress_callback: ProgressCallback = None) -> Dict[
     if not video_path:
         return {'reels': [], 'title': title}
 
-    cut_files = cut_segments_from_video(video_path, highlights, output_dir=config.OUTPUT_CLIPS_DIR)
+    cut_files = cut_segments_from_video(video_path, highlights, words=words, output_dir=config.OUTPUT_CLIPS_DIR)
     if not cut_files:
         _notify(progress_callback, "[!] No video clips were created to process with background.")
         return {'reels': [], 'title': title}
@@ -127,34 +137,47 @@ def process_video(url: str, progress_callback: ProgressCallback = None) -> Dict[
             print(f"[+] Deleted clip: {os.path.basename(f)}")
         except OSError as e:
             print(f"[!] Could not delete clip {os.path.basename(f)}: {e}")
+        cues_file = Path(f).with_suffix('.cues.json')
+        if cues_file.exists():
+            try:
+                cues_file.unlink()
+            except OSError:
+                pass
 
-    _notify(progress_callback, f"[+] 🎉 Done: {len(reels)} Instagram reels ready in downloads/instagram_reels/{title}/")
-    return {'reels': reels, 'title': title, 'total_time': time.time() - start_time}
+    categories = Counter(h.get('category', 'other') for h in highlights)
+    breakdown = ", ".join(f"{count} {name}" for name, count in categories.most_common())
+    _notify(progress_callback, f"[+] 🎉 Done: {len(reels)} Instagram reels ready in downloads/instagram_reels/{title}/ ({breakdown})")
+    return {
+        'reels': reels, 'title': title, 'total_time': time.time() - start_time,
+        'categories': dict(categories),
+    }
 
 
 def _run_audio_pipeline(
     url: str, title: str, groq_api_key: str, progress_callback: ProgressCallback = None
-) -> Tuple[List[Dict], List[Dict]]:
+) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Download audio, chunk it, and pipeline transcribe+extract per chunk with
-    a one-chunk prefetch so the LLM rate-limit pacing wait isn't wasted time."""
+    a one-chunk prefetch so the LLM rate-limit pacing wait isn't wasted time.
+    Returns (sentences, words, highlights)."""
     mp3_path = download_audio(url, title, str(config.DOWNLOADS_DIR))
     if not mp3_path:
-        return [], []
+        return [], [], []
 
     chunks = chunk_audio(mp3_path, config.CHUNK_DURATION_SECONDS, config.CHUNK_OVERLAP_SECONDS, str(config.DOWNLOADS_DIR))
     if not chunks:
-        return [], []
+        return [], [], []
     _notify(progress_callback, f"[+] 📼 Split audio into {len(chunks)} chunk(s) for transcription + analysis")
 
     prep_pool = ThreadPoolExecutor(max_workers=1)
 
     all_sentences: List[Dict] = []
+    all_words: List[Dict] = []
     all_clips: List[Dict] = []
     next_future: Future = prep_pool.submit(transcribe_chunk, *chunks[0], groq_api_key)
 
     for i, (chunk_path, offset) in enumerate(chunks):
         _notify(progress_callback, f"[+] 🎯 Transcribing chunk {i + 1}/{len(chunks)} ({offset:.0f}s - {offset + config.CHUNK_DURATION_SECONDS:.0f}s)...")
-        chunk_sentences = next_future.result()
+        chunk_sentences, chunk_words = next_future.result()
 
         # Prefetch the NEXT chunk's transcription now, so it happens in the
         # background while THIS chunk's LLM call + rate-limit pacing wait
@@ -172,8 +195,10 @@ def _run_audio_pipeline(
         if i > 0:
             boundary = offset + config.CHUNK_OVERLAP_SECONDS
             all_sentences.extend(s for s in chunk_sentences if s['start'] >= boundary)
+            all_words.extend(w for w in chunk_words if w['start'] >= boundary)
         else:
             all_sentences.extend(chunk_sentences)
+            all_words.extend(chunk_words)
 
         _notify(progress_callback, f"[+] 🤖 Sending chunk {i + 1}/{len(chunks)} to AI for clip selection...")
         try:
@@ -199,11 +224,11 @@ def _run_audio_pipeline(
 
     if not all_clips:
         _notify(progress_callback, "[!] AI extraction failed for all chunks, falling back to keyword matching.")
-        return all_sentences, extract_meaningful_parts(all_sentences)
+        return all_sentences, all_words, extract_meaningful_parts(all_sentences)
 
     deduped = dedupe_clips(all_clips)
     _notify(progress_callback, f"[+] ✅ Collected {len(deduped)} unique clips across {len(chunks)} chunk(s)")
-    return all_sentences, deduped
+    return all_sentences, all_words, deduped
 
 
 def _resolve_missing_timestamps(highlights: List[Dict], sentences: List[Dict]) -> List[Dict]:
@@ -228,20 +253,25 @@ def _resolve_missing_timestamps(highlights: List[Dict], sentences: List[Dict]) -
 
 def _pad_clip_boundaries(
     highlights: List[Dict], sentences: List[Dict],
-    max_buffer: float = None, safety_margin: float = None,
+    lead_max: float = None, trail_max: float = None, safety_margin: float = None,
 ) -> List[Dict]:
-    """Pad each clip's start/end by up to max_buffer seconds so the cut doesn't
-    clip off the first syllable of the hook line (Whisper's sentence-start
-    timestamp often lands a beat after the word actually begins).
+    """Pad each clip's start by up to lead_max seconds so the cut doesn't clip
+    off the first syllable of the hook line (Whisper's sentence-start
+    timestamp often lands a beat after the word actually begins). The end is
+    padded by up to trail_max seconds (0 by default - the LLM is instructed
+    to end each clip on a deliberate conclusion, so there's no trailing word
+    to protect the way there is at the start).
 
-    The buffer is capped by the neighboring sentence's own boundary, minus a
+    Padding is capped by the neighboring sentence's own boundary, minus a
     small safety_margin, so it stops just BEFORE that sentence rather than
     landing exactly on (or into) it - Whisper's timestamps aren't frame-perfect,
     so landing exactly on the boundary can still catch the next sentence's own
     first syllable, which sounds like a new thought starting and immediately
     getting cut off."""
-    if max_buffer is None:
-        max_buffer = config.CLIP_BUFFER_SECONDS
+    if lead_max is None:
+        lead_max = config.CLIP_LEAD_BUFFER_SECONDS
+    if trail_max is None:
+        trail_max = config.CLIP_TRAIL_BUFFER_SECONDS
     if safety_margin is None:
         safety_margin = config.CLIP_BUFFER_SAFETY_MARGIN
 
@@ -256,14 +286,51 @@ def _pad_clip_boundaries(
             continue
 
         prev_end = max((e for e in sentence_ends if e <= start), default=0.0)
-        next_start = min((s for s in sentence_starts if s >= end), default=end + max_buffer)
+        next_start = min((s for s in sentence_starts if s >= end), default=end + trail_max)
 
         lead_gap = max(0.0, (start - prev_end) - safety_margin)
         trail_gap = max(0.0, (next_start - end) - safety_margin)
 
-        lead_buffer = min(max_buffer, lead_gap)
-        trail_buffer = min(max_buffer, trail_gap)
+        lead_buffer = min(lead_max, lead_gap)
+        trail_buffer = min(trail_max, trail_gap)
+
+        # Don't let padding push a clip that's already near the duration
+        # ceiling over it - that would get the whole clip dropped by
+        # _filter_by_duration for a few seconds of breathing room, which is
+        # exactly backwards. Scale padding down (not off) so it still uses
+        # whatever room is actually available.
+        room = max(0.0, config.CLIP_DURATION_MAX - (end - start))
+        total_buffer = lead_buffer + trail_buffer
+        if total_buffer > room:
+            scale = (room / total_buffer) if total_buffer > 0 else 0.0
+            lead_buffer *= scale
+            trail_buffer *= scale
 
         padded.append({**h, 'start_time': start - lead_buffer, 'end_time': end + trail_buffer})
 
     return padded
+
+
+def _filter_by_duration(highlights: List[Dict], progress_callback: ProgressCallback = None) -> List[Dict]:
+    """Drop any clip outside [CLIP_DURATION_MIN, CLIP_DURATION_MAX] - a safety
+    net regardless of why it ended up too short (the LLM ignoring the prompt,
+    or the keyword-matching fallback grabbing a single short sentence) or too
+    long (padding pushed it past the ceiling)."""
+    kept = []
+    dropped = 0
+    for h in highlights:
+        start, end = h.get('start_time'), h.get('end_time')
+        if start is None or end is None:
+            dropped += 1
+            continue
+        duration = end - start
+        if config.CLIP_DURATION_MIN <= duration <= config.CLIP_DURATION_MAX:
+            kept.append(h)
+        else:
+            dropped += 1
+            logger.info(f"Dropping clip outside duration bounds ({duration:.1f}s): {h.get('text', '')[:60]}")
+
+    if dropped:
+        _notify(progress_callback, f"[+] Dropped {dropped} clip(s) outside {config.CLIP_DURATION_MIN}-{config.CLIP_DURATION_MAX}s")
+
+    return kept

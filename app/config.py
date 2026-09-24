@@ -20,6 +20,7 @@ TARGET_WIDTH = 1080      # Instagram reel width
 TARGET_HEIGHT = 1920     # Instagram reel height (1080x1920 = 9:16)
 VIDEO_SCALE_FACTOR = 0.7 # How much of the reel height the video should occupy (70%)
 VIDEO_QUALITY = 25       # libx264 CRF - lower is higher quality
+SUBTITLE_FONT_SIZE = 60  # libass renders SRT at the frame's native resolution (1080x1920 here)
 
 # Audio Settings
 AUDIO_BITRATE = "128k"
@@ -27,15 +28,41 @@ AUDIO_BITRATE = "128k"
 # AI Settings (Groq)
 DEFAULT_AI_MODEL = "openai/gpt-oss-120b"   # Clip-selection LLM
 GROQ_WHISPER_MODEL = "whisper-large-v3"    # Transcription model
-CLIP_DURATION_MIN = 30   # Minimum clip duration in seconds
-CLIP_DURATION_TARGET_MAX = 40  # Ideal/target max - the LLM should aim for this...
-CLIP_DURATION_MAX = 90         # ...but may run up to this long if it needs the extra
-                                # time to reach a real, complete ending instead of
-                                # cutting off mid-thought
-CLIP_BUFFER_SECONDS = 3.0  # Pad each clip's start/end by up to this much so the cut
-                            # doesn't clip off the first syllable of the hook line -
-                            # bounded by the neighboring sentence's own boundary, so
-                            # it never eats into the previous/next sentence's speech
+
+# Tone/category taxonomy the LLM classifies each clip into (see the prompt in
+# ai/generate_script.py for the per-category description shown to the model).
+# "other" is always allowed as a catch-all for a clip that doesn't fit.
+CLIP_CATEGORIES = {
+    "motivational": "pushes the viewer to take action - hustle, discipline, 'you can do this' energy",
+    "inspirational": "a real story of struggle/achievement/triumph that inspires",
+    "funny": "humor, comedy, a funny observation or moment",
+    "sarcastic": "dry wit, irony, sarcastic humor",
+    "stoic": "calm philosophical wisdom about handling life, emotional discipline",
+    "emotional": "touching, heartfelt, vulnerable, tear-jerking",
+    "controversial": "a polarizing opinion or rage-bait take people will argue about",
+    "shocking": "a surprising reveal, plot twist, or unbelievable fact/story",
+    "educational": "teaches a concrete skill, fact, or how-to",
+    "relatable": "'this is literally me' everyday relatable content",
+    "savage": "a brutal comeback, roast, callout, no-filter bluntness",
+    "mindblowing": "an insight or fact that changes how you see something",
+    "other": "doesn't clearly fit any category above",
+}
+CLIP_DURATION_MIN = 30          # Hard floor - shorter clips are dropped
+CLIP_DURATION_MAX = 120         # Hard ceiling - longer clips are dropped
+CLIP_DURATION_TARGET_MIN = 90   # Ideal range is TARGET_MIN-MAX (i.e. bias toward the long
+                                 # end, close to MAX) - the LLM should only land below this,
+                                 # down to the MIN floor, when there's genuinely not enough
+                                 # connected material nearby to extend the clip further
+CLIP_LEAD_BUFFER_SECONDS = 3.0  # Pad each clip's START by up to this much so the cut
+                                 # doesn't clip off the first syllable of the hook line -
+                                 # bounded by the neighboring sentence's own boundary, so
+                                 # it never eats into the previous sentence's speech
+CLIP_TRAIL_BUFFER_SECONDS = 0.0  # No padding after the clip's END - the LLM is instructed
+                                  # to end each clip on a deliberate conclusion (the
+                                  # punchline/answer/resolution), so there's no trailing
+                                  # word to protect the way there is at the start, and
+                                  # extra tail padding only risks bleeding into whatever
+                                  # unrelated content comes next
 CLIP_BUFFER_SAFETY_MARGIN = 0.5  # Extra pullback when the gap to the neighboring
                                   # sentence is tight, so the buffer stops just
                                   # BEFORE that sentence's boundary rather than

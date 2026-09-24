@@ -128,10 +128,25 @@
   .clip .name {
     font-size: 0.78rem;
     color: var(--muted);
-    padding: 6px 8px;
+    padding: 6px 8px 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .clip .badge {
+    display: inline-block;
+    margin: 0 8px 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    background: rgba(108, 92, 231, 0.18);
+    color: #b3a5f7;
+  }
+  .breakdown {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin: 2px 0 0;
   }
 </style>
 </head>
@@ -246,22 +261,32 @@ function renderLibrary(videos) {
     return;
   }
 
-  libraryEl.innerHTML = videos.map((v, i) => `
+  libraryEl.innerHTML = videos.map((v, i) => {
+    const categories = v.categories || {};
+    const breakdown = Object.entries(categories)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => `${count} ${name}`)
+      .join(', ');
+
+    return `
     <details class="video-card" ${i === 0 ? 'open' : ''}>
       <summary>
         <span>${escapeHtml(v.title)}</span>
         <span class="count">${v.clips.length} clip${v.clips.length === 1 ? '' : 's'}</span>
       </summary>
+      ${breakdown ? `<p class="breakdown">${escapeHtml(breakdown)}</p>` : ''}
       <div class="clip-grid">
         ${v.clips.map(c => `
           <div class="clip">
-            <video controls preload="metadata" src="/clips/${encodeURIComponent(v.title)}/${encodeURIComponent(c)}"></video>
-            <div class="name">${escapeHtml(c)}</div>
+            <video controls preload="metadata" src="/clips/${encodeURIComponent(v.title)}/${encodeURIComponent(c.name)}"></video>
+            <div class="name">${escapeHtml(c.name)}</div>
+            ${c.category ? `<span class="badge">${escapeHtml(c.category)}</span>` : ''}
           </div>
         `).join('')}
       </div>
     </details>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function escapeHtml(s) {

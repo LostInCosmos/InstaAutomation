@@ -69,6 +69,11 @@ def main() -> None:
     for reel in reels:
         print(f"   📱 {os.path.basename(reel)}")
 
+    categories = result.get('categories', {})
+    if categories:
+        breakdown = ", ".join(f"{count} {name}" for name, count in sorted(categories.items(), key=lambda kv: -kv[1]))
+        print(f"   🏷️  {breakdown}")
+
     total_time = result.get('total_time', 0)
     minutes, seconds = int(total_time // 60), int(total_time % 60)
     print(f"\n🎯 PROCESSING COMPLETE!")

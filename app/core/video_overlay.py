@@ -1,6 +1,7 @@
 import os
 import subprocess
 import json
+import tempfile
 import time
 import logging
 from PIL import Image
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import config
 from concurrent.futures import ThreadPoolExecutor
+from core.subtitles import load_cues, write_ass
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -25,18 +27,36 @@ def check_ffmpeg() -> bool:
     logger.info("FFmpeg is available")
     return True
 
-def overlay_video_on_background(video_path: str, background_image_path: str, output_path: str, 
-                               target_width: Optional[int] = None, target_height: Optional[int] = None) -> Optional[str]:
+def _escape_ffmpeg_path(path: str) -> str:
+    """Escape a path for safe use as a single-quoted ffmpeg filtergraph option
+    value (e.g. subtitles=filename='...'). Backslash and colon are escaped
+    for the filtergraph mini-language. A literal single quote can't be
+    escaped *inside* a quoted string at all in ffmpeg's parser - so it's
+    handled the same way POSIX shells do: close the quote, insert a
+    backslash-escaped quote, then reopen the quote (['it's] -> 'it'\''s').
+    A prior version used "\\'" here, which just truncates the string at the
+    quote instead of escaping it - broke every clip for any video title
+    containing an apostrophe (confirmed in production: "Neuroscientist's
+    Guide..." caused 'Error initializing filters' for all 36 clips)."""
+    escaped = str(path).replace('\\', '\\\\').replace(':', '\\:')
+    return escaped.replace("'", "'\\''")
+
+
+def overlay_video_on_background(video_path: str, background_image_path: str, output_path: str,
+                               target_width: Optional[int] = None, target_height: Optional[int] = None,
+                               cues_path: Optional[str] = None) -> Optional[str]:
     """
     Overlay a video clip onto a background image to create Instagram reel format.
-    
+
     Args:
         video_path: Path to the input video clip
         background_image_path: Path to the background image
         output_path: Path where the final video will be saved
         target_width: Target width for Instagram reels (uses config default if None)
         target_height: Target height for Instagram reels (uses config default if None)
-    
+        cues_path: Optional path to a JSON cues file (from core.subtitles.save_cues)
+            to render as burned-in subtitles
+
     Returns:
         Path to the created video file if successful, None otherwise
     """
@@ -50,7 +70,8 @@ def overlay_video_on_background(video_path: str, background_image_path: str, out
     
     # Ensure output directory exists
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    
+
+    temp_ass_path = None
     try:
         # Get video dimensions and duration
         probe_cmd = [
@@ -95,23 +116,60 @@ def overlay_video_on_background(video_path: str, background_image_path: str, out
         print(f"[+] Video dimensions: {video_width}x{video_height}")
         print(f"[+] Scaled dimensions: {scaled_width}x{scaled_height}")
         print(f"[+] Position: ({x_offset}, {y_offset})")
-        
+
+        filter_complex = (
+            f"[0:v]scale={target_width}:{target_height}:flags=lanczos[bg];"
+            f"[1:v]scale={scaled_width}:{scaled_height}:flags=lanczos[vid];"
+        )
+
+        if cues_path and Path(cues_path).exists():
+            cues = load_cues(cues_path)
+            if cues:
+                # Burn subtitles into the background space just below the
+                # video, not overlapping it. White text with a black outline
+                # for legibility against whatever the background art looks
+                # like. Position/size are only known now that y_offset and
+                # scaled_height are computed, so the ASS file (which is what
+                # libass actually honors reliably - see core.subtitles) is
+                # written here, at render time, not at cut time.
+                space_below_video = target_height - (y_offset + scaled_height)
+                margin_v = max(60, int(space_below_video * 0.4))
+                # Use a neutral system temp path, NOT one derived from
+                # output_path - that lives in a folder named after the video
+                # title, which can contain characters (apostrophes, colons)
+                # that are awkward-to-impossible to escape correctly inside
+                # an ffmpeg filtergraph's quoted option value. Simplest fix:
+                # never put untrusted/arbitrary text in that path at all.
+                ass_fd, temp_ass_path = tempfile.mkstemp(suffix='.ass')
+                os.close(ass_fd)
+                write_ass(
+                    cues, temp_ass_path,
+                    play_width=target_width, play_height=target_height,
+                    font_size=config.SUBTITLE_FONT_SIZE, margin_v=margin_v,
+                )
+
+        if temp_ass_path:
+            escaped_ass = _escape_ffmpeg_path(temp_ass_path)
+            filter_complex += (
+                f"[bg][vid]overlay={x_offset}:{y_offset}:format=yuv420[composited];"
+                f"[composited]subtitles=filename='{escaped_ass}'[out]"
+            )
+        else:
+            filter_complex += f"[bg][vid]overlay={x_offset}:{y_offset}:format=yuv420[out]"
+
         # FFmpeg command to overlay video on background (optimized for 720p quality)
         ffmpeg_cmd = [
             "ffmpeg", "-y",  # Overwrite output file
-            
+
             # Input background image
             "-loop", "1", "-i", background_image_path,
-            
-            # Input video  
+
+            # Input video
             "-i", video_path,
-            
+
             # High quality filter complex for 720p
-            "-filter_complex",
-            f"[0:v]scale={target_width}:{target_height}:flags=lanczos[bg];"
-            f"[1:v]scale={scaled_width}:{scaled_height}:flags=lanczos[vid];"
-            f"[bg][vid]overlay={x_offset}:{y_offset}:format=yuv420[out]",
-            
+            "-filter_complex", filter_complex,
+
             # Map the overlayed video and audio from original video
             "-map", "[out]",
             "-map", "1:a?",  # Map audio if present (? makes it optional)
@@ -155,6 +213,12 @@ def overlay_video_on_background(video_path: str, background_image_path: str, out
         logger.error(f"Error creating video overlay: {e}")
         print(f"[!] Error creating video overlay: {e}")
         return None
+    finally:
+        if temp_ass_path and Path(temp_ass_path).exists():
+            try:
+                Path(temp_ass_path).unlink()
+            except OSError as e:
+                logger.warning(f"Could not delete temp subtitle file {temp_ass_path}: {e}")
 
 def process_clips_with_background(clip_files: List[str], background_image_path: str, 
                                  output_dir: Optional[str] = None, 
@@ -218,10 +282,13 @@ def process_clips_with_background(clip_files: List[str], background_image_path: 
         logger.info(f"Processing clip {idx}/{len(clip_files)}: {clip_file.name}")
         print(f"\n[{idx}/{len(clip_files)}] Processing: {clip_file.name}")
         
+        cues_path = clip_file.with_suffix('.cues.json')
+
         result_path = overlay_video_on_background(
             video_path=str(clip_path),
             background_image_path=background_image_path,
-            output_path=str(output_path)
+            output_path=str(output_path),
+            cues_path=str(cues_path) if cues_path.exists() else None,
         )
         
         if result_path:

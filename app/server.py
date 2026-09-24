@@ -12,6 +12,7 @@ Serves a single HTML page (app/web/index.html) that:
 This is a single-user, one-job-at-a-time local tool, not a multi-tenant
 server - state is a single in-memory dict, no database.
 """
+import json
 import os
 import threading
 from pathlib import Path
@@ -25,7 +26,7 @@ from core.video_overlay import check_ffmpeg, verify_background_image
 app = Flask(__name__, static_folder=None)
 
 _job_lock = threading.Lock()
-_job = {"state": "idle", "message": "", "reels": [], "title": None, "error": None}
+_job = {"state": "idle", "message": "", "reels": [], "title": None, "error": None, "categories": {}}
 
 
 def _run_job(url: str) -> None:
@@ -39,9 +40,12 @@ def _run_job(url: str) -> None:
             _job["state"] = "done"
             _job["reels"] = result.get("reels", [])
             _job["title"] = result.get("title")
-            _job["message"] = (
-                f"Done - {len(_job['reels'])} reels ready" if _job["reels"] else "Finished, but no reels were produced"
-            )
+            _job["categories"] = result.get("categories", {})
+            if _job["reels"]:
+                breakdown = ", ".join(f"{n} {name}" for name, n in sorted(_job["categories"].items(), key=lambda kv: -kv[1]))
+                _job["message"] = f"Done - {len(_job['reels'])} reels ready ({breakdown})" if breakdown else f"Done - {len(_job['reels'])} reels ready"
+            else:
+                _job["message"] = "Finished, but no reels were produced"
     except Exception as e:
         with _job_lock:
             _job["state"] = "error"
@@ -65,7 +69,7 @@ def api_process():
     with _job_lock:
         if _job["state"] == "running":
             return jsonify({"error": "A video is already processing"}), 409
-        _job.update(state="running", message="Starting...", reels=[], title=None, error=None)
+        _job.update(state="running", message="Starting...", reels=[], title=None, error=None, categories={})
 
     threading.Thread(target=_run_job, args=(url,), daemon=True).start()
     return jsonify({"started": True})
@@ -79,16 +83,41 @@ def api_status():
 
 @app.route("/api/library")
 def api_library():
-    """List every processed video's folder and the clips inside it."""
+    """List every processed video's folder, the clips inside it, and each
+    clip's AI-assigned category (best-effort match by position against the
+    video's saved highlights - matches 1:1 in the normal case; if a clip
+    failed partway through the pipeline for that run, categories may be
+    slightly off rather than missing entirely)."""
     reels_dir = Path(config.OUTPUT_REELS_DIR)
+    downloads_dir = Path(config.DOWNLOADS_DIR)
     videos = []
     if reels_dir.exists():
         for folder in sorted(reels_dir.iterdir(), reverse=True):
             if not folder.is_dir():
                 continue
-            clips = sorted(f.name for f in folder.iterdir() if f.suffix == ".mp4")
-            if clips:
-                videos.append({"title": folder.name, "clips": clips})
+            clip_names = sorted(f.name for f in folder.iterdir() if f.suffix == ".mp4")
+            if not clip_names:
+                continue
+
+            categories = []
+            highlights_path = downloads_dir / f"{folder.name}_highlights.json"
+            if highlights_path.exists():
+                try:
+                    with open(highlights_path, "r", encoding="utf-8") as f:
+                        highlights = json.load(f)
+                    categories = [h.get("category", "other") for h in highlights]
+                except (OSError, json.JSONDecodeError):
+                    categories = []
+
+            clips = [
+                {"name": name, "category": categories[i] if i < len(categories) else None}
+                for i, name in enumerate(clip_names)
+            ]
+            counts = {}
+            for c in categories[:len(clip_names)]:
+                counts[c] = counts.get(c, 0) + 1
+
+            videos.append({"title": folder.name, "clips": clips, "categories": counts})
     return jsonify({"videos": videos})
 
 

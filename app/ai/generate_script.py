@@ -18,6 +18,8 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
         text = segment.get('text', '')
         formatted_transcript += f"[{start_time:.1f}s - {end_time:.1f}s]: {text}\n"
 
+    category_list = "\n".join(f"  - {name}: {desc}" for name, desc in config.CLIP_CATEGORIES.items())
+
     prompt = (
         f"From the FULL timestamped transcript below, find EVERY good clip that would work as a standalone "
         "social media reel. Read through the ENTIRE transcript before deciding - do not stop after finding "
@@ -25,11 +27,15 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
         "there's enough material), spread across different parts of the transcript rather than clustered "
         "in one section.\n\n"
         "IMPORTANT RULES:\n"
-        f"- Target length is {config.CLIP_DURATION_MIN}-{config.CLIP_DURATION_TARGET_MAX} seconds. You may run "
-        f"up to {config.CLIP_DURATION_MAX} seconds if - and only if - you need the extra time to reach a real, "
-        "complete ending. A clip that's a bit longer with a satisfying conclusion is ALWAYS better than a "
-        "shorter one that cuts off mid-thought. Never end a clip mid-sentence or mid-idea just to hit a "
-        "shorter duration\n"
+        f"- LENGTH BIAS: aim for clips as CLOSE TO {config.CLIP_DURATION_MAX} SECONDS AS THE CONTENT NATURALLY "
+        f"SUPPORTS. The ideal range is {config.CLIP_DURATION_TARGET_MIN}-{config.CLIP_DURATION_MAX} seconds - "
+        f"treat that as the normal target, not the exception. Only go shorter than that (down to the "
+        f"{config.CLIP_DURATION_MIN}s absolute minimum) when there genuinely is not enough connected, on-topic "
+        "material anywhere nearby to extend the clip further. When in doubt, extend the clip by pulling in more "
+        "of the surrounding relevant content (more of the story, more supporting points, more related jokes) "
+        "rather than cutting it short. A clip that's longer with a satisfying conclusion is ALWAYS better than "
+        "a shorter one, even if the shorter one felt complete on its own. Never end a clip mid-sentence or "
+        "mid-idea just to hit a shorter duration\n"
         "- DO NOT cut off sentences mid-way - ensure each clip has natural start and end points, and ends on "
         "a genuine conclusion (the punchline, the answer, the resolution) rather than trailing off\n"
         "- The clip's OPENING LINE must work as a hook on its own - a bold claim, a surprising fact, a direct "
@@ -38,12 +44,20 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
         "- If the transcript is a conversation/interview, prefer clips that capture a full, satisfying exchange "
         "(a complete question and its answer, or a complete back-and-forth) over a single isolated statement "
         "ripped out of context\n"
+        "- If a single funny/punchy moment (e.g. a joke's setup+punchline in a stand-up or comedy transcript) "
+        "runs short on its own, do NOT return it in isolation just because it's funny. Instead, extend the clip "
+        "to include several adjacent jokes/moments on the same theme or riff (e.g. a run of jokes about the "
+        "same topic back-to-back) so they play as one continuous bit reaching as close to the target length as "
+        "the riff allows - this is almost always possible and makes a stronger clip than a single short "
+        "punchline anyway\n"
         "- Group consecutive segments together to create coherent, engaging narratives\n"
-        "- Focus on: motivational quotes, funny moments, emotional stories, mind-blowing facts, complete explanations\n"
         "- Prefer clips that can stand alone and make sense without additional context\n"
         "- Calculate exact start and end times based on the timestamps provided\n"
         "- Do NOT return multiple clips that cover the same or heavily overlapping time range - "
-        "pick only the single best version of each moment\n\n"
+        "pick only the single best version of each moment\n"
+        "- Classify each clip's tone into EXACTLY ONE of these categories (use the category name exactly "
+        "as written, lowercase):\n"
+        f"{category_list}\n\n"
         f"Timestamped Transcript:\n{formatted_transcript}\n\n"
         "Return your response as valid JSON in this exact format:\n"
         "{\n"
@@ -53,7 +67,8 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
         "      \"start_time\": start_timestamp_in_seconds,\n"
         "      \"end_time\": end_timestamp_in_seconds,\n"
         "      \"duration\": duration_in_seconds,\n"
-        "      \"hook\": \"the opening hook line and why it grabs attention\"\n"
+        "      \"hook\": \"the opening hook line and why it grabs attention\",\n"
+        "      \"category\": \"one of the category names listed above\"\n"
         "    }\n"
         "  ]\n"
         "}\n"
@@ -86,6 +101,8 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
                     clip.setdefault('end_time', None)
                     clip.setdefault('duration', None)
                     clip.setdefault('hook', 'AI extracted content')
+                    category = str(clip.get('category', '')).strip().lower()
+                    clip['category'] = category if category in config.CLIP_CATEGORIES else 'other'
                     valid_clips.append(clip)
 
             if valid_clips:
@@ -101,7 +118,7 @@ def extract_clips_from_segment(segments: List[Dict], model: str, groq_api_key: s
     logger.info("Falling back to text extraction")
     highlights = [line.lstrip('-• ').strip() for line in content.split('\n') if line.strip()]
     fallback_clips = [
-        {"text": h, "start_time": None, "end_time": None, "duration": None, "hook": "AI extracted"}
+        {"text": h, "start_time": None, "end_time": None, "duration": None, "hook": "AI extracted", "category": "other"}
         for h in highlights if h
     ]
     logger.info(f"Extracted {len(fallback_clips)} clips from text fallback")
@@ -153,7 +170,8 @@ def extract_meaningful_parts(transcript_segments: List[Dict]) -> List[Dict]:
                 "start_time": segment.get('start'),
                 "end_time": segment.get('end'),
                 "duration": segment.get('end', 0) - segment.get('start', 0),
-                "hook": "Keyword matched"
+                "hook": "Keyword matched",
+                "category": "other"
             })
 
     logger.info(f"Extracted {len(results)} segments using keyword matching")
